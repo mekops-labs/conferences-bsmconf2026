@@ -73,11 +73,14 @@ pre code {
 }
 
 .hljs-string,
-.hljs-attr,
 .hljs-symbol,
 .hljs-bullet,
 .hljs-addition {
   color: #f2c49b;
+}
+
+.hljs-attr {
+  color: #9ecfc4;
 }
 
 .hljs-number,
@@ -89,7 +92,7 @@ pre code {
 .hljs-name,
 .hljs-section,
 .hljs-function {
-  color: #9ecfc4;
+  color: #e894c4;
 }
 
 .hljs-variable,

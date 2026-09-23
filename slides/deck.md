@@ -184,15 +184,15 @@ engine vulnerability.
 
 ## One continuous chain
 
-```sh
+```yaml
 verified boot              # silicon: bootrom + OTP
-        ▼
+     ▼
 WANTED Engine  ◀──── hardware-rooted device identity
-        ▼
+     ▼
 signed desired state       # control plane and supervisor
-        ▼
+     ▼
 signed wapp                # checked at every load
-        ▼
+     ▼
 caps-confined execution    # Wasm linear memory + WASI
 ```
 
