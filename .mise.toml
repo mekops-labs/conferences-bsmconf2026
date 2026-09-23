@@ -1,4 +1,5 @@
 [tools]
+node = "20"
 "npm:@marp-team/marp-cli" = "4.5.1"
 
 [tasks.slides]
