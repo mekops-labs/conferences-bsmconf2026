@@ -1,0 +1,6 @@
+[tools]
+"npm:@marp-team/marp-cli" = "4.5.1"
+
+[tasks.slides]
+description = "Render the slide deck to a standalone HTML file (open in any browser)"
+run = "marp slides/deck.md --theme-set slides/mekops.css -o slides/deck.html --html"
