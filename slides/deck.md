@@ -320,11 +320,11 @@ On the RP2350 the bootrom answers it with **A/B slots and Try-Before-You-Buy¹**
 
 ---
 
-## The demo: one cable, no network
+## The demo
 
 **Live, on an Adafruit Feather RP2350** — no network stack on the board:
 
-- it **enrols** — a one-use join token redeemed for a per-device secret
+- it **enrolls** — a one-use join token redeemed for a per-device secret
 - **Ed25519-verified desired state** arrives over that cable
 - a **signed wapp** is published, signature-checked by the control plane,
   carried over the same cable, and run
