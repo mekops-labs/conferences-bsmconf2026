@@ -2,7 +2,6 @@
 title: "Where the Chain of Trust Goes Dark — Slides"
 marp: true
 theme: mekops
-paginate: true
 ---
 
 
@@ -28,44 +27,42 @@ paginate: true
 
 ## Verified boot is solved on paper
 
-- A hardware root of trust measures and authorizes each stage — bootrom →
-  bootloader → **application image**.
-- Then the chain **terminates at the application**.
-- Everything the application loads **afterward** runs unverified.
+- A hardware root of trust measures and authorizes each stage: bootrom →
+  bootloader → **application image**,
+- then the chain **terminates at the application**,
+- everything the application loads **afterward** runs unverified.
 
 ## The devices that matter, load code after boot
 
-OTA firmware modules, plugins, updatable logic. For a fleet of internet-facing
+OTA firmware, plugins, updatable logic. For a fleet of internet-facing
 microcontrollers, *that* is the attack surface — and it sits **outside** the
 boot-security envelope.
 
----
-
-## Thesis
-
-> On devices that run code they download, the **chain of trust is only as long
-> as the runtime makes it.**
-
-## Question
-
-> How to secure small targets in a portable manner?
+_On devices that run code they download, the **chain of trust is only as long
+as the runtime makes it.** How do we secure those in a portable manner?_
 
 ---
 
 ## WebAssembly 101
 
-Not a language - a **compile target**: C, Rust, Zig and others compile **to**
-it, and a **small virtual machine executes it**. Three properties do the
-security work and none of them depend on an OS.
+Not a language - a **compile target (bytecode)**: C, Go, Rust, Zig and others
+**compile to** it, and a **small virtual machine (interpreter) executes it**.
+
+Four properties do the security work and none of them depend on an OS:
 
 1. **Memory is one flat array the module owns** - addressed to module's own
-   linear memory, every access is bounds-checked.<br/>*A pointer into the host, the
-   runtime's own structures, or a neighbour is not forbidden, it is **not
+   linear memory, every access is bounds-checked. *A pointer into the host,
+   the runtime's own structs, or a neighbour is not forbidden, it is **not
    expressible***.
 2. **The call stack is not in that memory** - return addresses live in the VM,
    out of reach. Overflow a buffer and you corrupt only the module's own data.
 3. **No ambient authority** - a module can call only the functions imported
    into it. There is no syscall table to reach for.
+4. **The interpreter is to be trusted** - different modes can be used (AOT, JIT,
+   fast or classic interpreter). For best security and portability
+   classic-interpreter mode is good option: no codegen, no W^X window to abuse,
+   but we pay with performance. Interpreter vulnerability *is* a runtime
+   vulnerability.
 
 ---
 
@@ -80,13 +77,9 @@ security work and none of them depend on an OS.
 | To escape   | kernel bug or a loose cap | a bug in the runtime |
 | Requires    | MMU and Linux | **neither** |
 
----
-
-## Against the thing you probably already know, cont.
-
-The deepest difference is **the default**:
-- a container starts with **everything and you take things away**
-- a module starts with **nothing and you hand things in**
+_The main difference is **the default**: a container starts with
+**everything and you take things away**; a Wasm module starts with **nothing and
+you hand things in**_.
 
 ---
 
@@ -97,7 +90,7 @@ boundary, and it is silent about two things.
 
 | Wasm answers | Wasm says nothing about |
 |--------------|-------------------------|
-| Can this code tries to reach memory it **does not own**? | Where did this code **come from**? |
+| Can this code try to reach memory it **does not own**? | Where did this code **come from**? |
 | Can it call something it was **not given**?     | What is it **allowed to touch** on this device? |
 
 Isolation is not provenance, and it is not authority - perfectly sandboxed
@@ -107,7 +100,7 @@ module of unknown origin, granted everything, is still a bad day.
 
 ## Let's try to answer all
 
-<table style="border-collapse:collapse; margin:0"><tr>
+<table style="border-collapse:collapse; margin:0 auto"><tr>
 <td style="border:none; padding:0 1.5em 0 0">
 <div style="text-align:center">
 
@@ -123,62 +116,50 @@ module of unknown origin, granted everything, is still a bad day.
 </td>
 </tr></table>
 <style scoped>
+h2 { margin-bottom: 0.15em; }
+table { margin-top: 0 !important; margin-left: auto !important; margin-right: auto !important; }
 table td p { margin: 0; }
+p, li { font-size: 0.85em; }
+ul { margin: 0.3em 0; }
+li { margin: 0.15em 0; }
 </style>
 
 OSS runtime for ARM/RISC-V/Xtensa/x86 (and possibly
 others) - treats the post-boot gap as a first-class boot-security problem.
 
-- **engine** — one process; a Wasm interpreter (**WAMR**) and a filesystem
-  router
+- **engine** — one process; a Wasm interpreter (**WAMR**) and a VFS router
 - **wapp** — an **OCI image** with Wasm module + ro filesystem with static data
-- **supervisor** — a privileged wapp that reconciles what the engine runs
+- **supervisor** — system wapp that decides what engine runs
   against **signed desired state**
 - **control plane** — signs that state, supervisor verifies it
 
----
-
-## Let's try to answer all, cont.
-
-**What it adds on top of Wasm:** 
-- **provenance** — images signed and checked at every load - _do we know the source_
-- **authority** — capabilities granted from outside the image - _what we allow_
-- **identity** — desired state bound to one device and one generation - _what we actually run and where_
+**What it adds on top of Wasm:** **provenance** (signed, checked at every
+load — _do we know the source_), **authority** (capabilities granted from
+outside the image — _what we allow_), **identity** (desired state bound to
+one device and one generation — _what we actually run and where_).
 
 --- 
 
 ## What a wapp actually is
 
-A **wapp** is an OCI image whose layers carry a **WebAssembly module** and its
-read-only filesystem — pulled from an docker-compatible registry, exactly like
-an usual container image. The packaging is the same.
+A **wapp** is an OCI image carrying a **Wasm module** and its read-only
+filesystem — pulled like an ordinary container image. Portable - runs across
+ISAs with no recompilation required.
 
-- **One OS process, thread per workload**: a running wapp is an interpreter
-  instance and a thread inside the engine.
-- **The image cannot ask for anything**: a wapp image has no way to express a
-  request — its authority arrives in the launch config the supervisor installs.
-- **Same bytes, every target**: the identical wapp runs on Linux and on a
-  Cortex-M33 with no recompile.
+- **One OS process, thread per workload** - an interpreter instance and a
+  thread inside the engine.
+- **The image cannot ask for anything** - authority arrives only through the
+  signed desired state's launch config.
 
-The image is **pure content**. Everything an attacker would want to *grant* it,
-lives in the desired state, transmitted on a secure channel, and signed.
+**What it sees through WASI (WebAssembly System Interface) — nothing but
+paths:**
 
----
-
-## Why Wasm, specifically
-
-The isolation is a property of the **instruction set** — which matters when your
-MCU has no MMU to build a ring with.
-
-- **Bounds-checked linear memory**: a wapp addresses only its own memory, every
-  access is checked by the interpreter. Enforced by WAMR.
-- **No W^X window at all**: WAMR's classic interpreter mode means no code
-  generation — nothing to make writable-then-executable. Pays with perf.
-- **No ambient syscalls:** the only host interface is the WASI bridge, and every
-  call routes through the VFS.
-
-**The honest limit:** the interpreter is trusted. A WAMR vulnerability is an
-engine vulnerability.
+```sh
+/            # its own OCI layers (ro)
+/data        # a granted mount
+/dev/gpio    # a granted driver
+/net/uplink  # a granted network socket
+```
 
 ---
 
@@ -206,6 +187,10 @@ Each hop is a distinct trust layer with its **own key** or its **own gate**.
   **signed boot** (secp256k1 + a hardware SHA-256 accelerator). **TrustZone-M**
   available to additionally isolate the control plane from workloads - not used
   for now.
+- **Dual-ISA silicon:** two Arm Cortex-M33 cores or two RISC-V Hazard3 cores,
+  switchable at boot. **Secure boot is Arm-only** — the bootrom enforces no
+  signature check on the RISC-V path, so a secured device disables those
+  cores outright.
 
 **Two distinct, chained key layers:**
 
@@ -216,10 +201,27 @@ Each hop is a distinct trust layer with its **own key** or its **own gate**.
 
 ---
 
+## How the RP2350 bootrom checks it
+
+1. Scans flash for a signed image, copies the **whole thing into SRAM** *before*
+   checking anything
+   - the recommended path if enough SRAM available, since flash contents can
+   change after the check (swap the chip, or emulate it with an FPGA), and
+   checking-then-running in place would trust bytes that could have already moved.
+2. Hashes it (**SHA-256**), decrypts the signature with the key embedded in
+   the image (**secp256k1**), checks hash against signature.
+3. Hashes *that key* and checks it against one of up to 4 fingerprints burned
+   into **OTP** - signed by the right key, or it doesn't run.
+4. **Anti-rollback** -  an optional step: version is checked against a floor
+   burned into OTP that can only go up - a fuse-bit property. Booting a newer
+   image raises the floor, hence older signed images are refused from then on.
+
+---
+
 ## Link 2 — Signed control plane
 
-The on-device supervisor — **Sheriff** — accepts only **Ed25519-signed desired
-state**.
+The on-device supervisor — **Sheriff** — accepts only **Ed25519-signed,
+CBOR-encoded, desired state**.
 
 - Monotonic **`generation`** counter — an old or equal generation is rejected.
 - **`device_id`** bound into the signed payload — a valid signature for device A
@@ -242,26 +244,15 @@ That is the easy half. The hard half is **at rest**: the bytes sat in flash
 between the download and this boot.
 
 So the engine re-checks on every load. The signed message binds **identity to
-content**:
+content** — name + version, length-prefixed (without that, `foo`/`1.0` and
+`foo1`/`.0` would assemble the same bytes), plus the layer digests.
 
-*u8 len(name) | name | u8 len(version) | version | u8 count | digest₀ ..
-digestₙ₋₁*
-
-
---- 
-
-## Link 3 — Signed images, checked at every load, cont.
-
-- The **length prefixes** are important: without them `foo`/`1.0` and
-  `foo1`/`.0` assemble the same bytes.
 - Binding name and version closes **interposition** — validly signed bytes
   installed under *another* image's reference verify against a real key, and
   would be accepted by a payload that named only the bytes.
-- The verifying keyring is **compiled into the firmware**, so whatever covers
-  the firmware covers the keys:
-  -  multiple slots, so a key can be retired without stranding images signed by
-  the old one,
-  -  changing the keyring itself takes a firmware update.
+- The verifying keyring is **compiled into the firmware** — multiple slots so
+  a key can be retired without stranding old images; changing the keyring
+  itself takes a firmware update.
 
 ---
 
@@ -285,23 +276,6 @@ That grant **is** the capability set — no more, no less.
 
 ---
 
-## Power-on to a wapp running (RP2350 example)
-
-1. Bootrom loads the sealed firmware, verifies with *secp256k1*
-2. *WantedStart()* parses config, mounts the namespaces
-3. Supervisor image gets loaded.
-4. Supervisor fetches desired state from the control plane: *Ed25519* signature,
-   *generation*, *device_id*
-5. Supervisor installs the image and its signature into the registry.
-   *SHA-256*-summed over the install stream, recorded beside the image
-6. Engine loads the image, layers re-hashed, image **signature verified
-   against the firmware keyring**
-7. WAMR instantiates the module, allocates mem, imports WASI funcs
-8. Launch config applied, entrypoint runs, the config *is the capability set* —
-   mounts, drivers, sockets
-
----
-
 ## The OTA update is where the chain often breaks
 
 Verified boot proves the image **you already have**. The interesting question
@@ -314,7 +288,12 @@ On the RP2350 the bootrom answers it with **A/B slots and Try-Before-You-Buy¹**
 - If nothing confirms it, the next reset **reverts to the previous slot.** A bad
   update costs a reboot.
 
-<br/><br/>
+WANTED drives that A/B slot:
+- firmware is **packaged and pulled just like a wapp** — same OCI registry,
+  same digest identity.
+- Sheriff stages it, reboots, and **confirms or rolls back** — a bad build
+  can't crash-loop.
+
 <span style="font-size:0.6em">1. *RP2350 Datasheet, §5.1.17 "Try Before You Buy"
 (p.355)*</span>
 
@@ -338,7 +317,7 @@ On the RP2350 the bootrom answers it with **A/B slots and Try-Before-You-Buy¹**
 2. Carrying hardware-rooted trust into a content-addressed, signed software
    supply chain on constrained MCUs **is possible**.
 3. **Capability-based and memory confinements** (WASI / Plan 9-like VFS) on
-   bounds-checked Wasm memory is the runtime complement to verified boot — least
+   bounds-checked Wasm memory are the runtime complement to verified boot — least
    privilege, and a hard memory wall.
 4. **Verify at load, not at download** - an in-flight digest proves what
    arrived, only an at-rest check proves what is about to run.
@@ -355,6 +334,7 @@ On the RP2350 the bootrom answers it with **A/B slots and Try-Before-You-Buy¹**
   [github.com/mekops-labs/conferences-bsmconf2026](https://github.com/mekops-labs/conferences-bsmconf2026)
 
 
+<br/><br/><br/><br/>
 <div style="text-align:center;">
 
 

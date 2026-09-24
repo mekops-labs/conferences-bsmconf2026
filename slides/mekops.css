@@ -5,7 +5,7 @@ section {
   color: #575757;
   font-family: "Helvetica Neue", Arial, sans-serif;
   font-size: 32px;
-  padding: 30px 70px 60px;
+  padding: 18px 70px 60px;
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -118,10 +118,6 @@ th, td {
 th {
   background: #9c2d1e;
   color: #fff;
-}
-
-section::after {
-  color: #575757;
 }
 
 section.lead {
