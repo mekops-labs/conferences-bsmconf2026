@@ -3,10 +3,18 @@
 Operator procedure for the live demo: an Adafruit Feather RP2350 reaching a
 control plane on the laptop over USB, with no network on the board.
 
-Paths are relative to the workspace that holds the code repositories. 
-- The engine is [wanted-engine](https://gitlab.com/mekops/wanted/wanted-engine). 
-- The control plane is [deputy](https://gitlab.com/mekops/wanted/deputy). 
+Paths are relative to the workspace that holds the code repositories.
+- The engine is [wanted-engine](https://gitlab.com/mekops/wanted/wanted-engine).
+- The control plane is [deputy](https://gitlab.com/mekops/wanted/deputy).
 - The image signer is [wsign](https://gitlab.com/mekops/wanted/wsign).
+
+
+This runbook assumes macOS. `macos-notes.md`, in this same directory, states
+each place the underlying commands differ from Linux, and why.
+
+The demo runs one wapp throughout — `wsh` (`wanted-engine/wapps/wsh/`), an
+interactive VFS shell. It proves the signed-install/refusal chain exactly like
+any other wapp would.
 
 ## Hardware
 
@@ -23,13 +31,7 @@ Each board reset gives the ports new numbers. Identify them by USB vendor id
 before each use.
 
 ```sh
-for t in /dev/ttyACM*; do
-    n=$(basename "$t"); d=$(readlink -f "/sys/class/tty/$n/device")
-    while [ "$d" != "/" ]; do
-        [ -f "$d/idVendor" ] && { printf '%-14s %s\n' "$t" "$(cat "$d/idVendor")"; break; }
-        d=$(dirname "$d")
-    done
-done
+./macos-ports.sh
 ```
 
 - Vendor id `2e8a` is the Debug Probe. This is the console.
@@ -42,7 +44,7 @@ Do this section on a new laptop only.
 ### A1. Registry
 
 ```sh
-podman run -d --name demo-registry -p 5000:5000 docker.io/library/registry:2
+./a1_registry.sh
 ```
 
 ### A2. Keys
@@ -55,163 +57,211 @@ wsign/bin/wsign keygen --out wanted-engine/keys/image-signing-demo.pem
 openssl rand -hex 32 > wanted-engine/keys/deputy-signing-seed.hex
 ```
 
-`keygen` prints the public half. Record it. A new image-signing key needs a new
-firmware build. A new signing seed needs a new enrolment.
+`keygen` prints the public half. Record it for the firmware build in A5. Later
+steps read the key file directly, so no other manual copy is necessary. A new
+image-signing key needs a new firmware build. A new signing seed needs a new
+enrolment.
 
 ### A3. Images
 
 Build two images from the same bytes. Sign one of them. The unsigned image is
-the refusal demo.
+the refusal demo. `wapps/wsh/` produces a plain `.wasm` via its own Makefile
+(pass `NAME=wsh` — the Makefile otherwise derives the name from the mounted
+directory, which is wrong when it's built inside a container).
 
 ```sh
-mkdir -p looper-img && cp wanted-engine/wapps/looper/looper.wasm looper-img/app.wasm
-printf 'FROM scratch\nCOPY app.wasm /app.wasm\n' > looper-img/Containerfile
-cd looper-img
-podman build -t localhost:5000/looper:1.0.0 . && podman push --tls-verify=false localhost:5000/looper:1.0.0
-podman build -t localhost:5000/rogue:1.0.0  . && podman push --tls-verify=false localhost:5000/rogue:1.0.0
+cd wanted-engine/wapps/wsh
+podman run --rm -v "$PWD:/src" --userns=keep-id -w /src \
+    registry.gitlab.com/mekops/wanted/wanted-engine/wapp-sdk:latest make NAME=wsh
+cd ../../..
+
+mkdir -p wsh-img && cp wanted-engine/wapps/wsh/wsh.wasm wsh-img/app.wasm
+printf 'FROM scratch\nCOPY app.wasm /app.wasm\n' > wsh-img/Containerfile
+cd wsh-img
+podman build -t localhost:5001/wsh:0.5.0 . && podman push --tls-verify=false localhost:5001/wsh:0.5.0
+podman build -t localhost:5001/rogue:1.0.0 . && podman push --tls-verify=false localhost:5001/rogue:1.0.0
+cd ..
 ```
 
 ### A4. Signature
 
-Sign `looper` only.
+Sign `wsh` only.
 
 ```sh
-wsign/bin/wsign publish --insecure \
-    --key wanted-engine/keys/image-signing-demo.pem --key-id 1 \
-    localhost:5000/looper:1.0.0
+./a4_sign.sh wsh:0.5.0
 ```
 
 ### A5. Firmware
 
 ```sh
 cd wanted-engine
-make defconfig rp2350_feather_sheriff && NUTTX_CLEAN=1 make build
-make rp2350-flash-swd
+make defconfig rp2350_feather_sheriff_wsh_demo && NUTTX_CLEAN=1 make build
+cd ..
+./a5_flash.sh
 ```
-
-`NUTTX_CLEAN=1` is necessary after a change to a board defconfig, a build
-profile, or the supervisor. Without it the build uses the previous values and
-reports success. After the build, examine the value in
-`third_party/nuttx/.config` to confirm the change is present.
 
 ## B. Start the control plane
 
 The control plane stops when its serial device disappears. Each board reset does
-this. Start it in a loop that waits for the port.
+this. `start-deputy.sh` runs it in a loop that waits for the port and restarts
+it, with signature verification required.
 
 ```sh
-export DEPUTY_IMAGE_SIGNING_KEYS="1:<image-signing public half>"
-while true; do
-    board=$(find_port 0525) && \
-      deputy/deputy server --serial "$board" --listen 127.0.0.1:8080 \
-        --signing-seed="$(cat wanted-engine/keys/deputy-signing-seed.hex)" \
-        --db "$WORK/deputy.db" --layer-cache "$WORK/layers" \
-        --registry-address localhost:5000 --oci-insecure --require-signed-images
-    sleep 0.5
-done
+./start-deputy.sh
 ```
 
 Before you continue, check two conditions.
 
-- Exactly one server process is active.
+- Exactly one server process is active: `pgrep -fl "deputy server"`.
 - The log contains `image signature verification enabled … required=true`.
 
 If a second server process starts, it stops on the port and the first process
 continues to serve. A push then goes to the process without signature
-verification.
+verification. Use `./stop-deputy.sh` before starting a second time, so the two
+never race.
 
 ## C. Enrol the board
 
-Do this once for each new board. Do it again after the flash filesystem is
-formatted.
+Do this once for each new board. Do it again after the flash filesystem is reset
+— see `reprovision.sh` in Troubleshooting.
 
 1. Issue the blob. It expires after approximately 15 minutes.
 
    ```sh
-   deputy/deputy device enrol
+   ./c1_enrol.sh
    ```
 
-   The command prints JSON, then the base64 blob on its own line.
+   This saves the device id to `demo-work/device-id`, for `push.sh` and
+   `show.sh` to read, and prints the exact steps for the next parts.
 
 2. Reset the board and open the console.
 
    ```sh
-   cd wanted-engine && make rp2350-reset
-   picocom -b 115200 /dev/ttyACM<probe>
+   ./reset.sh
+   ./console.sh
    ```
 
 3. The board prints `no device identity. paste a provisioning blob ...`. Paste
-   the base64 line within 30 seconds. Press Enter.
+   the base64 line `enrol.sh` printed, within 30 seconds. Press Enter.
 
 4. The board answers `stored 276 B at sheriff/provision`.
 
-5. Confirm the device is present and record the device id.
+5. Exit the console: press Ctrl-a, then press Ctrl-x.
+
+6. Confirm the device is present.
 
    ```sh
-   deputy/deputy device list
+   ./deputy.sh device list
    ```
 
    The `LINK` column reads `serial`.
 
 ## D. The demo
 
-1. Show the device reporting:
+### D1. Push `wsh`, granting it the console, `/dev/wanted`, Sheriff's log, and the LED
 
-    ```
-    deputy/deputy device list
-    ```
+```sh
+./d1_push.sh wsh 0.5.0 wsh:0.5.0
+```
 
-   `LINK` reads `serial`. `LAST SEEN` advances.
+`push.sh` recognizes the name `wsh` and applies its demo grant (`WSH_POLICY` in
+the script) automatically — nothing to type or paste live. Pass a 4th argument
+to override it (e.g. push a bare `wsh` with no grants). The grant itself:
 
-2. Push the signed wapp:
+```json
+{
+  "drivers": [
+    {"name":"wanted"},
+    {"name":"log","path":"/logs","options":"name=supervisor"},
+    {"name":"gpio","options":"pins=led:/dev/gpio7:out"}],
+  "console": {"out":{"name":"platform"},"in":{"name":"platform"}}
+}
+```
 
-   ```sh
-   deputy/deputy device wapp create --version=1.0.0 \
-       --image=localhost:5000/looper:1.0.0 <device-id> looper
-   ```
+### D2. Wapp running, signed
 
-4. What happens:
+```sh
+./d2_show.sh
+```
 
-   - The control plane verified the signature before it sent the state.
-   - The supervisor carries the signature and does not check it.
-   - The engine hashes the layers again and checks the signature against the
-     keyring compiled into the firmware, at every load.
+The output reports `wsh ... RUNNING`. Enforcement is active in this build, so a
+load that runs is a load that verified: the control plane verified the signature
+before it sent the state, the supervisor carries the signature and does not
+check it, and the engine hashes the layers again and checks the signature
+against the keyring compiled into the firmware, at every load.
 
-5. Wapp running:
+**One operational quirk worth knowing before doing this live:** after a
+`push.sh`, the device sometimes doesn't pick up the new generation until the
+board is reset once more (`./reset.sh`) — seen repeatedly on the bench, not yet
+root-caused. Build a reset into the push→show handoff rather than waiting on a
+stuck `AckGeneration`.
 
-   ```sh
-   deputy/deputy device show <device-id>
-   ```
+### D3. Show the first refusal. The control plane rejects the unsigned image.
 
-   The output reports `looper ... RUNNING`. Enforcement is active in this build,
-   so a load that runs is a load that verified. A failed check refuses the load.
+```sh
+./d1_push.sh rogue 1.0.0 rogue:1.0.0
+```
 
-6. Show the first refusal. The control plane rejects the unsigned image.
+The command reports `400 Bad Request: image carries no signature`. The image
+does not reach the board.
 
-   ```sh
-   deputy/deputy device wapp create --version=1.0.0 \
-       --image=localhost:5000/rogue:1.0.0 <device-id> rogue
-   ```
+### D4. Show the second refusal. Restart the control plane without `--require-signed-images`.
 
-   The command reports `400 Bad Request: image carries no signature`. The image
-   does not reach the board.
+```sh
+./stop-deputy.sh
+./start-deputy.sh --unenforced
+./d1_push.sh rogue 1.0.0 rogue:1.0.0
+./d2_show.sh
+```
 
-7. Show the second refusal. Restart the control plane without
-   `--require-signed-images`. Push `rogue` again. The image reaches the board
-   and the engine refuses it at load.
+The image reaches the board and the engine refuses it at load. The output
+reports the two together, from one identical layer digest.
 
-   ```sh
-   deputy/deputy device show <device-id>
-   ```
+```
+wsh    0.5.0  RUNNING
+rogue         ABSENT
+```
 
-   The output reports the two together, from one identical layer digest.
+The board also holds its acknowledged generation at the previous value.
+`show.sh`'s `EngineLog` field names the reason directly: `refused: image
+verification no_signature`.
 
-   ```
-   looper  1.0.0  RUNNING
-   rogue          ABSENT
-   ```
+Restart the control plane back to enforced (`./stop-deputy.sh` then
+`./start-deputy.sh`) before continuing.
 
-   The board also holds its acknowledged generation at the previous value.
+### D5. Drive it — the interactive walkthrough
+
+```sh
+./console.sh
+```
+
+**Use a real terminal program (`picocom`, `screen`), not a raw `cat`/`stty`
+capture.**
+
+Live transcript, `picocom -b 115200 <debug-probe-port>`:
+
+```
+> cat /proc/wanted
+platform:	nuttx
+version:	v0.20.3-dirty
+...
+drivers:	null log platform 9p config socket sha256 ed25519 inflate gpio ota wanted wifi
+
+> write /dev/gpio/led/value 1
+> cat /dev/gpio/led/value
+1
+> write /dev/gpio/led/value 0
+
+> cat /logs/supervisor
+[+330] sheriff v0.11.1-dirty starting
+[+460] pool 131072 B (wanted 81920 B)
+[+490] bounds wapps=16 layers=4 args=4 envs=4 drivers=8 desired=32768B report=4096B
+[+660] sheriff v0.11.1-dirty: reconciling (device="dep-c76bbc373d0e7153", self="supervisor", engine="v0.20.3-dirty", ack_gen=17)
+[+1450] fetch applied (accepted_gen=19)
+[+1480] acquiring layers for 1 wapp(s)
+[+1480] wsh: want sha256:2e9f9282bf4f: staged
+[+12110] fetch no_change (accepted_gen=19)
+```
 
 ## E. Secure boot, offline
 
@@ -249,11 +299,17 @@ mark is written before the seal, so the signature covers it.
 ## Troubleshooting
 
 - **The board's CDC port is absent from the host:** the supervisor stopped and
-  the board powered off. Reset the board.
+  the board powered off. Reset the board: `./reset.sh`.
 - **The console gives no output:** set the line discipline before you read the
-  port. Use a terminal program. As an alternative, run `stty -F <port> 115200
-  raw -echo` first.
+  port. `console.sh` does this. As an alternative, run `stty -f <port> 115200
+  raw -echo` first. If that still shows nothing, use `picocom`/`screen` instead
+  of a raw `cat` capture — see D5.
 - **The device does not appear:** examine the number of server processes.
-  Exactly one is correct. Then reset the board.
+  Exactly one is correct: `pgrep -fl "deputy server"`. Then reset the board.
 - **A push has no effect:** layer acquisition runs only on a tick that applies a
   new generation. Remove the wapp and create it again.
+- **The board needs a new enrolment, without a full reflash:** run
+  `./reprovision.sh`, then repeat section C. This clears the identity file and
+  any installed wapp state, in seconds, without touching firmware or keys. For a
+  guaranteed clean state instead, at the cost of several minutes, run
+  `./erase.sh` and repeat section A5.
